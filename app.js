@@ -20,6 +20,7 @@ const CYCLES = {
   quarterly: { label: '3か月ごと', months: 3 },
   semiannual: { label: '半年ごと', months: 6 },
   yearly: { label: '毎年', months: 12 },
+  multiyear: { label: '数年ごと', months: 12 }, // 実際の月数は years × 12
 };
 
 const ACCOUNT_TYPES = { ordinary: '普通', checking: '当座', savings: '貯蓄' };
@@ -97,7 +98,8 @@ const activeCosts = () => sortedCosts().filter((c) => c.active);
 
 /* ---------- 計算・表示 ---------- */
 
-const months = (cost) => (CYCLES[cost.cycle] || CYCLES.monthly).months;
+const months = (cost) =>
+  cost.cycle === 'multiyear' ? 12 * (Number(cost.years) || 1) : (CYCLES[cost.cycle] || CYCLES.monthly).months;
 // 金額は { lo, hi }（最小・最大）で扱う。幅がない固定費は lo と hi が同じ。
 const minAmount = (cost) => Number(cost.amount) || 0;
 const maxAmount = (cost) => (cost.isRange ? Math.max(Number(cost.amountMax) || 0, minAmount(cost)) : minAmount(cost));
@@ -121,6 +123,41 @@ function dayLabel(d) {
   if (d === 0) return '未設定';
   if (d >= 31) return '末日';
   return `${d}日`;
+}
+
+const cycleLabel = (cost) =>
+  cost.cycle === 'multiyear' ? `${Number(cost.years) || 1}年ごと` : (CYCLES[cost.cycle] || CYCLES.monthly).label;
+
+// 支払月（1〜12）から、周期に合わせて支払う月の一覧を出す（例：2か月ごと・1月 → 1・3・5・7・9・11月）
+function paymentMonths(cycle, month) {
+  const step = (CYCLES[cycle] || CYCLES.monthly).months;
+  if (!month || step <= 1 || step >= 12) return month ? [month] : [];
+  const list = [];
+  for (let k = 0; k < 12 / step; k++) list.push(((month - 1 + k * step) % 12) + 1);
+  return list.sort((a, b) => a - b);
+}
+
+const shortDay = (d) => (Number(d) ? dayLabel(d) : '');
+
+// 一覧に出す「いつ払うか」（例：4月27日、1・3・5・7・9・11月 27日、次回 2028年4月27日）
+function scheduleText(cost) {
+  const m = Number(cost.paymentMonth) || 0;
+  const day = shortDay(cost.paymentDay);
+  switch (cost.cycle) {
+    case 'bimonthly':
+    case 'quarterly':
+    case 'semiannual':
+      return m ? `${paymentMonths(cost.cycle, m).join('・')}月${day ? ' ' + day : ''}` : day;
+    case 'yearly':
+      return m ? `${m}月${day}` : day;
+    case 'multiyear': {
+      const y = Number(cost.nextYear) || 0;
+      if (!y && !m) return day;
+      return `次回 ${y ? y + '年' : ''}${m ? m + '月' : ''}${day}`;
+    }
+    default:
+      return day;
+  }
 }
 
 function esc(s) {
@@ -149,8 +186,8 @@ function paymentSummary(cost) {
 function costRow(cost, { showCategory = false, child = false } = {}) {
   const m = PAYMENT_METHODS[cost.method] || PAYMENT_METHODS.other;
   const cat = category(cost.categoryId);
-  const cycleParts = [(CYCLES[cost.cycle] || CYCLES.monthly).label];
-  if (Number(cost.paymentDay)) cycleParts.push(dayLabel(cost.paymentDay));
+  const schedule = scheduleText(cost);
+  const cycleParts = [schedule ? `${cycleLabel(cost)} ${schedule}` : cycleLabel(cost)];
   if (!cost.active) cycleParts.push('停止中');
   return `
     <button class="row${cost.active ? '' : ' inactive'}${child ? ' child' : ''}" data-action="edit-cost" data-id="${cost.id}">
@@ -342,7 +379,7 @@ function renderSettings() {
     <input type="file" id="import-file" accept="application/json,.json" hidden>`;
 
   html += sectionTitle('このアプリについて');
-  html += `<div class="group"><div class="row"><div class="main">バージョン</div><div class="right meta">1.1</div></div></div>`;
+  html += `<div class="group"><div class="row"><div class="main">バージョン</div><div class="right meta">1.2</div></div></div>`;
   return html;
 }
 
@@ -389,6 +426,14 @@ function closeSheet() {
 const options = (pairs, selected) =>
   pairs.map(([v, l]) => `<option value="${esc(v)}"${String(v) === String(selected ?? '') ? ' selected' : ''}>${esc(l)}</option>`).join('');
 
+function yearOptions(selected) {
+  const now = new Date().getFullYear();
+  const sel = Number(selected) || now;
+  const from = Math.min(now - 1, sel);
+  const to = Math.max(now + 10, sel);
+  return options(Array.from({ length: to - from + 1 }, (_, i) => [from + i, `${from + i}年`]), sel);
+}
+
 const dayOptions = (selected) =>
   options([[0, '未設定'], ...Array.from({ length: 31 }, (_, i) => [i + 1, dayLabel(i + 1)])], selected || 0);
 
@@ -404,7 +449,7 @@ function noteField(value) {
 
 /* 固定費 */
 function openCostSheet(cost) {
-  const c = cost || { name: '', amount: '', isRange: false, amountMax: '', cycle: 'monthly', paymentDay: 0, method: 'bankDebit', categoryId: '', accountId: '', cardId: '', detail: '', note: '', active: true };
+  const c = cost || { name: '', amount: '', isRange: false, amountMax: '', cycle: 'monthly', paymentDay: 0, paymentMonth: 0, years: 5, nextYear: new Date().getFullYear(), method: 'bankDebit', categoryId: '', accountId: '', cardId: '', detail: '', note: '', active: true };
   const catOpts = [['', '未分類'], ...sortedCategories().map((x) => [x.id, `${x.icon} ${x.name}`])];
   const accOpts = [['', '未選択'], ...sortedAccounts().map((x) => [x.id, accountName(x)])];
   const cardOpts = [['', '未選択'], ...sortedCards().map((x) => [x.id, x.name])];
@@ -421,6 +466,12 @@ function openCostSheet(cost) {
       <div class="field"><label for="f-amount" id="amount-label">金額</label><input id="f-amount" name="amount" type="number" inputmode="numeric" min="0" step="1" value="${esc(c.amount)}" placeholder="0"><span class="unit">円</span></div>
       <div class="field" id="max-row"><label for="f-amountMax">最大</label><input id="f-amountMax" name="amountMax" type="number" inputmode="numeric" min="0" step="1" value="${esc(c.isRange ? c.amountMax : '')}" placeholder="0"><span class="unit">円</span></div>
       ${selectField('周期', 'cycle', options(Object.entries(CYCLES).map(([k, v]) => [k, v.label]), c.cycle))}
+      <div id="years-row">${selectField('何年ごと', 'years', options(Array.from({ length: 9 }, (_, i) => [i + 2, `${i + 2}年ごと`]), c.years || 5))}</div>
+      <div id="nextyear-row">${selectField('次回の年', 'nextYear', yearOptions(c.nextYear))}</div>
+      <div id="month-row">
+        ${selectField('支払月', 'paymentMonth', options([[0, '未設定'], ...Array.from({ length: 12 }, (_, i) => [i + 1, `${i + 1}月`])], c.paymentMonth || 0))}
+        <div class="field meta" id="month-hint"></div>
+      </div>
       ${selectField('支払日', 'paymentDay', dayOptions(c.paymentDay))}
     </div>
     ${sectionTitle('支払い方法')}
@@ -471,6 +522,9 @@ function openCostSheet(cost) {
         amountMax: d.isRange ? Math.max(0, Math.round(Number(d.amountMax) || 0)) : 0,
         cycle: d.cycle,
         paymentDay: Number(d.paymentDay) || 0,
+        paymentMonth: d.cycle === 'monthly' ? 0 : Number(d.paymentMonth) || 0,
+        years: d.cycle === 'multiyear' ? Number(d.years) || 5 : 0,
+        nextYear: d.cycle === 'multiyear' ? Number(d.nextYear) || 0 : 0,
         method: d.method,
         categoryId: d.categoryId || '',
         accountId: d.method === 'bankDebit' ? d.accountId : '',
@@ -502,6 +556,21 @@ function openCostSheet(cost) {
   };
   form.elements.isRange.addEventListener('change', updateRange);
   updateRange();
+
+  const updateCycle = () => {
+    const cycle = form.elements.cycle.value;
+    form.querySelector('#years-row').hidden = cycle !== 'multiyear';
+    form.querySelector('#nextyear-row').hidden = cycle !== 'multiyear';
+    form.querySelector('#month-row').hidden = cycle === 'monthly';
+    const list = paymentMonths(cycle, Number(form.elements.paymentMonth.value));
+    const hint = form.querySelector('#month-hint');
+    const multi = ['bimonthly', 'quarterly', 'semiannual'].includes(cycle);
+    hint.hidden = !multi;
+    hint.textContent = list.length ? `支払う月：${list.join('・')}月` : '支払う月のどれか1つを選んでください';
+  };
+  form.elements.cycle.addEventListener('change', updateCycle);
+  form.elements.paymentMonth.addEventListener('change', updateCycle);
+  updateCycle();
   form.elements.method.addEventListener('change', update);
   form.elements.cardId.addEventListener('change', update);
   update();

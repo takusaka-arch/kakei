@@ -167,3 +167,4 @@ details .row.child { padding-left: 34px; background: rgba(127,127,127,0.05); }
 }
 .field.meta { font-size: 13px; color: var(--sub); }
 [hidden] { display: none !important; }
+.row .right .meta { white-space: normal; }
