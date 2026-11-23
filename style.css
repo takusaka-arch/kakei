@@ -166,3 +166,4 @@ details .row.child { padding-left: 34px; background: rgba(127,127,127,0.05); }
   background: rgba(40,40,42,0.92); color: #fff; padding: 10px 16px; border-radius: 20px; font-size: 14px; z-index: 30;
 }
 .field.meta { font-size: 13px; color: var(--sub); }
+[hidden] { display: none !important; }
