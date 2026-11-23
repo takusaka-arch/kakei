@@ -53,7 +53,7 @@ main { padding: 12px 16px calc(env(safe-area-inset-bottom) + 90px); max-width: 7
 
 .tabbar {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 5;
-  display: grid; grid-template-columns: repeat(4, 1fr);
+  display: grid; grid-template-columns: repeat(5, 1fr);
   padding: 6px 0 calc(env(safe-area-inset-bottom) + 6px);
   background: var(--bar);
   backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
@@ -168,3 +168,34 @@ details .row.child { padding-left: 34px; background: rgba(127,127,127,0.05); }
 .field.meta { font-size: 13px; color: var(--sub); }
 [hidden] { display: none !important; }
 .row .right .meta { white-space: normal; }
+
+/* 月別の支出グラフ */
+:root { --bar-now: #0f6b65; --bar-future: #1e9e95; --bar-past: #9fd3cf; }
+@media (prefers-color-scheme: dark) {
+  :root { --bar-now: #7fe3da; --bar-future: #2fb3a9; --bar-past: #1f4d4a; }
+}
+.chart-card { padding: 12px 8px 10px; }
+.chart { display: block; width: 100%; height: auto; overflow: visible; }
+.chart .grid { stroke: var(--line); stroke-width: 0.5; }
+.chart .baseline { stroke: var(--sub); stroke-width: 1; }
+.chart .axis { fill: var(--sub); font-size: 9px; }
+.chart .axis.now-label { fill: var(--text); font-weight: 700; }
+.chart .bar.now { fill: var(--bar-now); }
+.chart .bar.future { fill: var(--bar-future); }
+.chart .bar.past { fill: var(--bar-past); }
+.chart .bar.range { fill-opacity: 0.35; }
+.chart .marker { fill: var(--text); }
+.chart .hit { fill: transparent; cursor: pointer; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--sub); padding: 8px 6px 0; }
+.legend span { display: inline-flex; align-items: center; gap: 5px; }
+.legend .sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.legend .sw.now { background: var(--bar-now); }
+.legend .sw.future { background: var(--bar-future); }
+.legend .sw.past { background: var(--bar-past); }
+.legend .sw.range { background: var(--bar-future); opacity: 0.35; }
+.chart .bar.range { fill-opacity: 0.22; stroke-width: 1; }
+.chart .bar.now.range { stroke: var(--bar-now); }
+.chart .bar.future.range { stroke: var(--bar-future); }
+.chart .bar.past.range { stroke: var(--bar-past); }
+.legend .sw.range { background: color-mix(in srgb, var(--bar-future) 22%, transparent); border: 1px solid var(--bar-future); opacity: 1; }
+.tabbar button { font-size: 10px; white-space: nowrap; }

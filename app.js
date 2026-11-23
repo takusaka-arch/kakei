@@ -94,7 +94,28 @@ const sortedCategories = () => [...db.categories].sort((a, b) => a.order - b.ord
 const sortedAccounts = () => [...db.accounts].sort((a, b) => a.bankName.localeCompare(b.bankName, 'ja'));
 const sortedCards = () => [...db.cards].sort((a, b) => a.name.localeCompare(b.name, 'ja'));
 const sortedCosts = () => [...db.costs].sort((a, b) => a.name.localeCompare(b.name, 'ja'));
-const activeCosts = () => sortedCosts().filter((c) => c.active);
+// 年月は「月の通し番号」（年×12＋月−1）で扱う
+const ymIndex = (y, m) => y * 12 + (m - 1);
+const parseYM = (str) => {
+  const m = /^(\d{4})-(\d{1,2})$/.exec(str || '');
+  return m ? ymIndex(Number(m[1]), Number(m[2])) : null;
+};
+const ymYear = (idx) => Math.floor(idx / 12);
+const ymMonth = (idx) => (idx % 12) + 1;
+const ymLabel = (idx) => `${ymYear(idx)}年${ymMonth(idx)}月`;
+const nowIndex = () => {
+  const d = new Date();
+  return ymIndex(d.getFullYear(), d.getMonth() + 1);
+};
+// その月（通し番号）が、開始年月〜終了年月の期間に入っているか
+function inPeriod(cost, idx) {
+  const start = parseYM(cost.startYM);
+  const end = parseYM(cost.endYM);
+  return (start === null || idx >= start) && (end === null || idx <= end);
+}
+// 今月の時点で支払っているもの（停止中・開始前・終了済みを除く）
+const isCurrent = (cost) => cost.active && inPeriod(cost, nowIndex());
+const activeCosts = () => sortedCosts().filter(isCurrent);
 
 // カードの年会費を、毎年の固定費として扱うための仮の項目（保存はしない）
 const feeCosts = () =>
@@ -207,8 +228,13 @@ function costRow(cost, { showCategory = false, child = false } = {}) {
   const schedule = scheduleText(cost);
   const cycleParts = [schedule ? `${cycleLabel(cost)} ${schedule}` : cycleLabel(cost)];
   if (!cost.active) cycleParts.push('停止中');
+  const start = parseYM(cost.startYM);
+  const end = parseYM(cost.endYM);
+  if (end !== null && end < nowIndex()) cycleParts.push(`${ymLabel(end)}で終了`);
+  else if (start !== null && start > nowIndex()) cycleParts.push(`${ymLabel(start)}から`);
+  else if (end !== null) cycleParts.push(`${ymLabel(end)}まで`);
   return `
-    <button class="row${cost.active ? '' : ' inactive'}${child ? ' child' : ''}" data-action="${cost.feeOfCard ? 'edit-card' : 'edit-cost'}" data-id="${cost.feeOfCard || cost.id}">
+    <button class="row${isCurrent(cost) ? '' : ' inactive'}${child ? ' child' : ''}" data-action="${cost.feeOfCard ? 'edit-card' : 'edit-cost'}" data-id="${cost.feeOfCard || cost.id}">
       <div class="main">
         <div class="name">${esc(cost.name)}</div>
         <div class="meta">${m.icon} ${esc(paymentSummary(cost))}${showCategory && cat ? ` ・ ${esc(cat.name)}` : ''}</div>
@@ -231,6 +257,7 @@ let currentTab = 'costs';
 const TABS = {
   costs: { title: '固定費', render: renderCosts, add: () => openCostSheet(null) },
   summary: { title: '支払い方法別', render: renderSummary },
+  chart: { title: '月別の支出', render: renderChart },
   wallet: { title: 'カード・口座', render: renderWallet, add: openAddMenu },
   settings: { title: '設定', render: renderSettings },
 };
@@ -253,13 +280,13 @@ function renderCosts() {
   if (costs.length === 0 && fees.length === 0) {
     return `<div class="empty"><div class="big">📋</div>固定費がありません。<br>右上の＋から、電気代や携帯代などを登録しましょう。</div>`;
   }
-  const active = costs.filter((c) => c.active).concat(fees);
+  const active = costs.filter(isCurrent).concat(fees);
   let html = `
     <div class="group">
       <div class="row total"><div class="main">月あたり</div><div class="right amount">${yenRange(sumMonthly(active))}</div></div>
       <div class="row"><div class="main">年間</div><div class="right amount">${yenRange(sumYearly(active))}</div></div>
     </div>
-    <p class="footnote">停止中の固定費は含みません。毎月以外の支払いは月あたりに換算しています。</p>`;
+    <p class="footnote">今月の時点で支払っているものの合計です（停止中・開始前・終了済みは含みません）。毎月以外の支払いは月あたりに換算しています。</p>`;
 
   const groups = sortedCategories().map((cat) => ({
     title: `${cat.icon} ${esc(cat.name)}`,
@@ -270,7 +297,7 @@ function renderCosts() {
 
   for (const g of groups) {
     if (g.items.length === 0) continue;
-    html += sectionTitle(g.title, `${yenRange(sumMonthly(g.items.filter((c) => c.active)))} / 月`);
+    html += sectionTitle(g.title, `${yenRange(sumMonthly(g.items.filter(isCurrent)))} / 月`);
     html += `<div class="group">${g.items.map((c) => costRow(c)).join('')}</div>`;
   }
   return html;
@@ -330,6 +357,189 @@ function renderSummary() {
     html += sectionTitle('⚠️ 口座・カードが未設定', `${yenRange(sumMonthly(unassigned))} / 月`);
     html += `<div class="group">${unassigned.map((x) => costRow(x, { showCategory: true })).join('')}</div>`;
   }
+  return html;
+}
+
+/* ---------- 月別の支出（グラフ） ---------- */
+
+// 固定費が「支払いが発生する月」に、いくら発生するか。
+// 支払月が決まらないもの（未設定）は、月あたりに換算して毎月に入れる（spread: true）。
+function chargesInMonth(cost, idx) {
+  if (!cost.active || !inPeriod(cost, idx)) return null;
+  const r = amountRange(cost);
+  const m = ymMonth(idx);
+  const pm = Number(cost.paymentMonth) || 0;
+  const spread = () => ({ ...scale(r, 1 / months(cost)), spread: true });
+  switch (cost.cycle) {
+    case 'monthly':
+      return { ...r, spread: false };
+    case 'bimonthly':
+    case 'quarterly':
+    case 'semiannual': {
+      if (!pm) return spread();
+      const step = CYCLES[cost.cycle].months;
+      return (((m - pm) % step) + step) % step === 0 ? { ...r, spread: false } : null;
+    }
+    case 'yearly':
+      if (!pm) return spread();
+      return m === pm ? { ...r, spread: false } : null;
+    case 'multiyear': {
+      const years = Number(cost.years) || 1;
+      const ny = Number(cost.nextYear) || 0;
+      if (!pm || !ny) return spread();
+      const diff = ymYear(idx) - ny;
+      return m === pm && ((diff % years) + years) % years === 0 ? { ...r, spread: false } : null;
+    }
+    default:
+      return { ...r, spread: false };
+  }
+}
+
+// カード払いの場合、何か月後に銀行から引き落とされるか
+function debitShift(cost) {
+  if (cost.method !== 'creditCard' || cost.feeOfCard) return 0; // 年会費は「引き落とし月」で登録済み
+  const c = card(cost.cardId);
+  if (!c) return 0;
+  const day = Number(cost.paymentDay) || 0;
+  const closing = Number(c.closingDay) || 0;
+  const closeShift = day && closing && day > closing ? 1 : 0; // 締め日を過ぎたら翌月の締め
+  return closeShift + (Number(c.payCycle) === 2 ? 2 : 1);
+}
+
+// from〜to の各月に銀行から出ていく金額と内訳
+function monthlyDebits(from, to) {
+  const result = new Map();
+  for (let i = from; i <= to; i++) result.set(i, { lo: 0, hi: 0, items: [] });
+  const all = sortedCosts().concat(feeCosts());
+  for (const cost of all) {
+    const shift = debitShift(cost);
+    for (let i = from - shift; i <= to - shift; i++) {
+      const ch = chargesInMonth(cost, i);
+      if (!ch || (ch.lo === 0 && ch.hi === 0)) continue;
+      const slot = result.get(i + shift);
+      slot.lo += ch.lo;
+      slot.hi += ch.hi;
+      slot.items.push({ cost, lo: ch.lo, hi: ch.hi, spread: ch.spread, usedIn: shift ? i : null });
+    }
+  }
+  return result;
+}
+
+let selectedMonth = null;
+
+// 目盛りがきりのよい数（1・2・2.5・5 × 10^n）になるように、間隔と上限を決める
+function niceScale(v, ticks = 4) {
+  if (v <= 0) return { max: 10000, step: 2500 };
+  const raw = v / ticks;
+  const pow = 10 ** Math.floor(Math.log10(raw));
+  const step = [1, 2, 2.5, 5, 10].map((k) => k * pow).find((x) => x >= raw);
+  return { max: step * Math.ceil(v / step), step };
+}
+
+const shortYen = (v) => (v >= 10000 ? `${Math.round((v / 10000) * 10) / 10}万` : `${Math.round(v).toLocaleString('ja-JP')}`);
+
+function renderChart() {
+  const now = nowIndex();
+  const from = now - 12;
+  const to = now + 12;
+  if (selectedMonth === null || selectedMonth < from || selectedMonth > to) selectedMonth = now;
+  const data = monthlyDebits(from, to);
+  const monthList = [...data.keys()];
+  const { max, step } = niceScale(Math.max(...monthList.map((i) => data.get(i).hi)));
+
+  // SVG の寸法
+  const W = 360, H = 220, left = 34, right = 4, top = 10, bottom = 34;
+  const plotW = W - left - right;
+  const plotH = H - top - bottom;
+  const slot = plotW / monthList.length;
+  const barW = Math.max(4, slot - 2); // 棒の間は 2px あける
+  const y = (v) => top + plotH - (v / max) * plotH;
+
+  let svg = `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="月別の引き落とし額の棒グラフ">`;
+  for (let v = 0; v <= max + 0.5; v += step) {
+    const yy = y(v);
+    svg += `<line class="grid" x1="${left}" x2="${W - right}" y1="${yy}" y2="${yy}"/>`;
+    svg += `<text class="axis" x="${left - 4}" y="${yy + 3}" text-anchor="end">${v === 0 ? '0' : shortYen(v)}</text>`;
+  }
+  monthList.forEach((i, n) => {
+    const d = data.get(i);
+    const x = left + n * slot + (slot - barW) / 2;
+    const cls = i < now ? 'past' : i === now ? 'now' : 'future';
+    const r = Math.min(4, barW / 2);
+    const bar = (v0, v1, extra) => {
+      const y0 = y(v0), y1 = y(v1);
+      const h = y0 - y1;
+      if (h <= 0.5) return '';
+      const rr = Math.min(r, h);
+      // 上の角だけ丸めた棒
+      return `<path class="bar ${cls}${extra}" d="M${x},${y0} V${y1 + rr} Q${x},${y1} ${x + rr},${y1} H${x + barW - rr} Q${x + barW},${y1} ${x + barW},${y1 + rr} V${y0} Z"/>`;
+    };
+    if (d.hi > d.lo) {
+      svg += bar(0, d.lo, '');
+      const gap = d.lo > 0 ? (2 * max) / plotH : 0; // 2px のすき間
+      svg += bar(d.lo + gap, d.hi, ' range');
+    } else {
+      svg += bar(0, d.lo, '');
+    }
+    if (i === selectedMonth) {
+      svg += `<path class="marker" d="M${x + barW / 2 - 4},${H - bottom + 6} h8 l-4,-5 z"/>`;
+    }
+    const m = ymMonth(i);
+    if (m === 1 || n === 0 || i === now) {
+      // 左端の年は、すぐ右に1月の年ラベルが来るときは重なるので出さない
+      const label = m === 1 || (n === 0 && m <= 10) ? `${ymYear(i)}` : '';
+      if (label) svg += `<text class="axis" x="${x + barW / 2}" y="${H - 4}" text-anchor="${n === 0 ? 'start' : 'middle'}">${label}</text>`;
+    }
+    if (m % 3 === 1 || i === now) {
+      svg += `<text class="axis${i === now ? ' now-label' : ''}" x="${x + barW / 2}" y="${H - bottom + 18}" text-anchor="middle">${m}</text>`;
+    }
+    // タップしやすいように、棒より広い透明の当たり判定
+    svg += `<rect class="hit" data-action="select-month" data-idx="${i}" x="${left + n * slot}" y="${top}" width="${slot}" height="${plotH + 24}"><title>${ymLabel(i)} ${yenRange(d)}</title></rect>`;
+  });
+  svg += `<line class="baseline" x1="${left}" x2="${W - right}" y1="${y(0)}" y2="${y(0)}"/>`;
+  svg += '</svg>';
+
+  const sumOf = (a, b) => {
+    let t = { lo: 0, hi: 0 };
+    for (let i = a; i <= b; i++) t = addRange(t, data.get(i));
+    return t;
+  };
+  const sel = data.get(selectedMonth);
+  const items = [...sel.items].sort((a, b) => b.hi - a.hi);
+
+  let html = `
+    <div class="group chart-card">
+      ${svg}
+      <div class="legend">
+        <span><i class="sw now"></i>今月</span>
+        <span><i class="sw future"></i>これから</span>
+        <span><i class="sw past"></i>過去</span>
+        <span><i class="sw range"></i>金額の幅</span>
+      </div>
+    </div>
+    <p class="footnote">カード払いは、締め日と支払いサイクルから計算した「銀行から引き落とされる月」で表示しています。棒をタップすると内訳が出ます。</p>
+    <div class="group" style="margin-top:12px">
+      <div class="row"><div class="main">過去12か月の合計</div><div class="right amount">${yenRange(sumOf(now - 12, now - 1))}</div></div>
+      <div class="row"><div class="main">これから12か月の合計</div><div class="right amount">${yenRange(sumOf(now, now + 11))}</div></div>
+    </div>`;
+
+  html += sectionTitle(`${ymLabel(selectedMonth)}の引き落とし`, yenRange(sel));
+  html += '<div class="group">';
+  if (!items.length) html += '<div class="row muted">この月の引き落としはありません</div>';
+  for (const it of items) {
+    const notes = [esc(paymentSummary(it.cost))];
+    if (it.usedIn !== null) notes.push(`${ymMonth(it.usedIn)}月利用分`);
+    if (it.spread) notes.push('支払月未設定（月割り）');
+    html += `
+      <button class="row" data-action="${it.cost.feeOfCard ? 'edit-card' : 'edit-cost'}" data-id="${it.cost.feeOfCard || it.cost.id}">
+        <div class="main">
+          <div class="name">${esc(it.cost.name)}</div>
+          <div class="meta${it.spread ? ' warn' : ''}">${(PAYMENT_METHODS[it.cost.method] || PAYMENT_METHODS.other).icon} ${notes.join(' ・ ')}</div>
+        </div>
+        <div class="right amount">${yenRange(it)}</div>
+      </button>`;
+  }
+  html += '</div>';
   return html;
 }
 
@@ -399,7 +609,7 @@ function renderSettings() {
     <input type="file" id="import-file" accept="application/json,.json" hidden>`;
 
   html += sectionTitle('このアプリについて');
-  html += `<div class="group"><div class="row"><div class="main">バージョン</div><div class="right meta">1.3</div></div></div>`;
+  html += `<div class="group"><div class="row"><div class="main">バージョン</div><div class="right meta">1.4</div></div></div>`;
   return html;
 }
 
@@ -510,6 +720,12 @@ function openCostSheet(cost) {
         <div class="field stack"><label for="f-detail" id="detail-label">詳細</label><textarea id="f-detail" name="detail" rows="2">${esc(c.detail)}</textarea></div>
       </div>
     </div>
+    ${sectionTitle('期間')}
+    <div class="group">
+      <div class="field"><label for="f-startYM">開始年月</label><input id="f-startYM" name="startYM" type="month" value="${esc(c.startYM || '')}"></div>
+      <div class="field"><label for="f-endYM">終了年月</label><input id="f-endYM" name="endYM" type="month" value="${esc(c.endYM || '')}"></div>
+    </div>
+    <p class="footnote">空欄のときは「ずっと続く」として扱います。</p>
     ${sectionTitle('その他')}
     <div class="group">
       <div class="field check"><label for="f-active">支払い中</label><input type="checkbox" id="f-active" name="active" ${c.active ? 'checked' : ''}></div>
@@ -530,6 +746,12 @@ function openCostSheet(cost) {
     onSubmit: (d) => {
       const name = d.name.trim();
       if (!name) { alert('サービス名を入力してください'); return false; }
+      const startIdx = parseYM(d.startYM);
+      const endIdx = parseYM(d.endYM);
+      if (startIdx !== null && endIdx !== null && endIdx < startIdx) {
+        alert('終了年月は、開始年月以降にしてください');
+        return false;
+      }
       if (d.isRange && (Number(d.amountMax) || 0) < (Number(d.amount) || 0)) {
         alert('最大の金額は、最小の金額以上にしてください');
         return false;
@@ -552,6 +774,8 @@ function openCostSheet(cost) {
         detail: d.method === 'bankTransfer' || d.method === 'other' ? d.detail : '',
         note: d.note,
         active: d.active,
+        startYM: startIdx === null ? '' : d.startYM,
+        endYM: endIdx === null ? '' : d.endYM,
       });
       if (!cost) db.costs.push(target);
       save();
@@ -613,6 +837,7 @@ function openCardSheet(c) {
       ${selectField('引き落とし口座', 'accountId', options(accOpts, x.accountId))}
       ${selectField('締め日', 'closingDay', dayOptions(x.closingDay))}
       ${selectField('引き落とし日', 'paymentDay', dayOptions(x.paymentDay))}
+      ${selectField('支払いサイクル', 'payCycle', options([[1, '翌月払い'], [2, '翌々月払い']], x.payCycle || 1))}
       <div class="field"><label for="f-annualFee">年会費</label><input id="f-annualFee" name="annualFee" type="number" inputmode="numeric" min="0" step="1" value="${esc(Number(x.annualFee) ? x.annualFee : '')}" placeholder="無料"><span class="unit">円</span></div>
       ${selectField('年会費の引き落とし月', 'feeMonth', options([[0, '未設定'], ...Array.from({ length: 12 }, (_, i) => [i + 1, `${i + 1}月`])], x.feeMonth || 0))}
     </div>
@@ -645,6 +870,7 @@ function openCardSheet(c) {
         closingDay: Number(d.closingDay) || 0,
         annualFee: Math.max(0, Math.round(Number(d.annualFee) || 0)),
         feeMonth: Number(d.feeMonth) || 0,
+        payCycle: Number(d.payCycle) === 2 ? 2 : 1,
         paymentDay: Number(d.paymentDay) || 0,
         note: d.note,
       });
@@ -835,6 +1061,7 @@ document.addEventListener('click', (e) => {
     case 'add-card': closeSheet(); openCardSheet(null); break;
     case 'add-account': closeSheet(); openAccountSheet(null); break;
     case 'add-category': openCategorySheet(null); break;
+    case 'select-month': selectedMonth = Number(el.dataset.idx); render(); break;
     case 'move-category': moveCategory(id, Number(el.dataset.dir)); break;
     case 'export': exportData(); break;
     case 'import': document.getElementById('import-file').click(); break;

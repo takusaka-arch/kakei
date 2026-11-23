@@ -1,6 +1,6 @@
 // オフラインで動くように、アプリ本体をキャッシュする。
 // ファイルを更新したら VERSION を上げる。
-const VERSION = 'v4';
+const VERSION = 'v5';
 const CACHE = `kakei-${VERSION}`;
 const FILES = [
   './',
