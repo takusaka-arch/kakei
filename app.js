@@ -96,6 +96,24 @@ const sortedCards = () => [...db.cards].sort((a, b) => a.name.localeCompare(b.na
 const sortedCosts = () => [...db.costs].sort((a, b) => a.name.localeCompare(b.name, 'ja'));
 const activeCosts = () => sortedCosts().filter((c) => c.active);
 
+// カードの年会費を、毎年の固定費として扱うための仮の項目（保存はしない）
+const feeCosts = () =>
+  sortedCards()
+    .filter((c) => Number(c.annualFee) > 0)
+    .map((c) => ({
+      id: `fee-${c.id}`,
+      feeOfCard: c.id,
+      name: `${c.name} 年会費`,
+      amount: Number(c.annualFee),
+      cycle: 'yearly',
+      paymentMonth: Number(c.feeMonth) || 0,
+      paymentDay: Number(c.paymentDay) || 0,
+      method: 'creditCard',
+      cardId: c.id,
+      categoryId: '',
+      active: true,
+    }));
+
 /* ---------- 計算・表示 ---------- */
 
 const months = (cost) =>
@@ -190,7 +208,7 @@ function costRow(cost, { showCategory = false, child = false } = {}) {
   const cycleParts = [schedule ? `${cycleLabel(cost)} ${schedule}` : cycleLabel(cost)];
   if (!cost.active) cycleParts.push('停止中');
   return `
-    <button class="row${cost.active ? '' : ' inactive'}${child ? ' child' : ''}" data-action="edit-cost" data-id="${cost.id}">
+    <button class="row${cost.active ? '' : ' inactive'}${child ? ' child' : ''}" data-action="${cost.feeOfCard ? 'edit-card' : 'edit-cost'}" data-id="${cost.feeOfCard || cost.id}">
       <div class="main">
         <div class="name">${esc(cost.name)}</div>
         <div class="meta">${m.icon} ${esc(paymentSummary(cost))}${showCategory && cat ? ` ・ ${esc(cat.name)}` : ''}</div>
@@ -231,10 +249,11 @@ function render() {
 
 function renderCosts() {
   const costs = sortedCosts();
-  if (costs.length === 0) {
+  const fees = feeCosts();
+  if (costs.length === 0 && fees.length === 0) {
     return `<div class="empty"><div class="big">📋</div>固定費がありません。<br>右上の＋から、電気代や携帯代などを登録しましょう。</div>`;
   }
-  const active = costs.filter((c) => c.active);
+  const active = costs.filter((c) => c.active).concat(fees);
   let html = `
     <div class="group">
       <div class="row total"><div class="main">月あたり</div><div class="right amount">${yenRange(sumMonthly(active))}</div></div>
@@ -247,6 +266,7 @@ function renderCosts() {
     items: costs.filter((c) => c.categoryId === cat.id),
   }));
   groups.push({ title: '❔ 未分類', items: costs.filter((c) => !category(c.categoryId)) });
+  groups.push({ title: '💳 カード年会費', items: fees });
 
   for (const g of groups) {
     if (g.items.length === 0) continue;
@@ -257,7 +277,7 @@ function renderCosts() {
 }
 
 function renderSummary() {
-  const costs = activeCosts();
+  const costs = activeCosts().concat(feeCosts());
   if (costs.length === 0) {
     return `<div class="empty"><div class="big">📊</div>表示する固定費がありません。</div>`;
   }
@@ -379,7 +399,7 @@ function renderSettings() {
     <input type="file" id="import-file" accept="application/json,.json" hidden>`;
 
   html += sectionTitle('このアプリについて');
-  html += `<div class="group"><div class="row"><div class="main">バージョン</div><div class="right meta">1.2</div></div></div>`;
+  html += `<div class="group"><div class="row"><div class="main">バージョン</div><div class="right meta">1.3</div></div></div>`;
   return html;
 }
 
@@ -578,7 +598,7 @@ function openCostSheet(cost) {
 
 /* クレジットカード */
 function openCardSheet(c) {
-  const x = c || { name: '', brand: '', last4: '', closingDay: 0, paymentDay: 0, accountId: '', note: '' };
+  const x = c || { name: '', brand: '', last4: '', closingDay: 0, paymentDay: 0, annualFee: '', feeMonth: 0, accountId: '', note: '' };
   const accOpts = [['', '未選択'], ...sortedAccounts().map((a) => [a.id, accountName(a)])];
   const paid = c ? sortedCosts().filter((y) => y.method === 'creditCard' && y.cardId === c.id) : [];
   const body = `
@@ -593,6 +613,8 @@ function openCardSheet(c) {
       ${selectField('引き落とし口座', 'accountId', options(accOpts, x.accountId))}
       ${selectField('締め日', 'closingDay', dayOptions(x.closingDay))}
       ${selectField('引き落とし日', 'paymentDay', dayOptions(x.paymentDay))}
+      <div class="field"><label for="f-annualFee">年会費</label><input id="f-annualFee" name="annualFee" type="number" inputmode="numeric" min="0" step="1" value="${esc(Number(x.annualFee) ? x.annualFee : '')}" placeholder="無料"><span class="unit">円</span></div>
+      ${selectField('年会費の引き落とし月', 'feeMonth', options([[0, '未設定'], ...Array.from({ length: 12 }, (_, i) => [i + 1, `${i + 1}月`])], x.feeMonth || 0))}
     </div>
     ${db.accounts.length ? '' : '<p class="footnote">先に銀行口座を登録すると、引き落とし口座を選べます。</p>'}
     ${sectionTitle('メモ')}
@@ -621,6 +643,8 @@ function openCardSheet(c) {
         last4: d.last4.replace(/\D/g, '').slice(0, 4),
         accountId: d.accountId,
         closingDay: Number(d.closingDay) || 0,
+        annualFee: Math.max(0, Math.round(Number(d.annualFee) || 0)),
+        feeMonth: Number(d.feeMonth) || 0,
         paymentDay: Number(d.paymentDay) || 0,
         note: d.note,
       });
